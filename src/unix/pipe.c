@@ -29,16 +29,18 @@
 #include <unistd.h>
 #include <stdlib.h>
 
+#if defined(__APPLE__) && defined(SOCK_MAXADDRLEN)
+#define UV__EXTRA_NAME_LEN (SOCK_MAXADDRLEN - sizeof(struct sockaddr_un))
+#else
+#define UV__EXTRA_NAME_LEN 0U
+#endif
+
+#define UV__NAME_BUFFER_SIZE (UV__EXTRA_NAME_LEN + sizeof(((struct sockaddr_un *)NULL)->sun_path))
+
 union uv__sockaddr_un {
   struct sockaddr sa;
-  struct uv__sockaddr_un_path {
-    char pad[offsetof(struct sockaddr_un, sun_path)];
-#ifdef SOCK_MAXADDRLEN
-    char path[SOCK_MAXADDRLEN - offsetof(struct sockaddr_un, sun_path)];
-#else
-    char path[sizeof(((struct sockaddr_un*)0)->sun_path)];
-#endif
-  } up;
+  struct sockaddr_un sun;
+  char _storage[sizeof(struct sockaddr_un) + UV__EXTRA_NAME_LEN];
 };
 
 
@@ -102,12 +104,12 @@ int uv_pipe_bind2(uv_pipe_t* handle,
     return UV_EINVAL;
 
   if (flags & UV_PIPE_NO_TRUNCATE)
-    if (namelen > sizeof(saddr.up.path))
+    if (namelen > UV__NAME_BUFFER_SIZE)
       return UV_EINVAL;
 
   /* Truncate long paths. Documented behavior. */
-  if (namelen > sizeof(saddr.up.path))
-    namelen = sizeof(saddr.up.path);
+  if (namelen > UV__NAME_BUFFER_SIZE)
+    namelen = UV__NAME_BUFFER_SIZE;
 
   /* Already bound? */
   if (uv__stream_fd(handle) >= 0)
@@ -128,7 +130,8 @@ int uv_pipe_bind2(uv_pipe_t* handle,
       return UV_ENOMEM;
     memcpy(pipe_fname, name, namelen);
     pipe_fname[namelen] = '\0';
-    addrlen = sizeof saddr;
+    //addrlen = sizeof saddr;
+    addrlen = offsetof(struct sockaddr_un, sun_path) + namelen;
   }
 
   err = uv__socket(AF_UNIX, SOCK_STREAM, 0);
@@ -137,8 +140,10 @@ int uv_pipe_bind2(uv_pipe_t* handle,
   sockfd = err;
 
   memset(&saddr, 0, sizeof saddr);
-  memcpy(saddr.up.path, name, namelen);
   saddr.sa.sa_family = AF_UNIX;
+  memcpy(saddr.sun.sun_path, name, namelen);
+  if (namelen < UV__NAME_BUFFER_SIZE)
+    saddr.sun.sun_path[namelen] = '\0';
 
   if (bind(sockfd, &saddr.sa, addrlen)) {
     err = UV__ERR(errno);
@@ -288,12 +293,12 @@ int uv_pipe_connect2(uv_connect_t* req,
     return UV_EINVAL;
 
   if (flags & UV_PIPE_NO_TRUNCATE)
-    if (namelen > sizeof(saddr.up.path))
+    if (namelen > UV__NAME_BUFFER_SIZE)
       return UV_EINVAL;
 
   /* Truncate long paths. Documented behavior. */
-  if (namelen > sizeof(saddr.up.path))
-    namelen = sizeof(saddr.up.path);
+  if (namelen > UV__NAME_BUFFER_SIZE)
+    namelen = UV__NAME_BUFFER_SIZE;
 
   new_sock = (uv__stream_fd(handle) == -1);
 
@@ -305,16 +310,13 @@ int uv_pipe_connect2(uv_connect_t* req,
   }
 
   memset(&saddr, 0, sizeof saddr);
-  memcpy(saddr.up.path, name, namelen);
+  memcpy(saddr.sun.sun_path, name, namelen);
   saddr.sa.sa_family = AF_UNIX;
 
-  if (*name == '\0')
-    addrlen = offsetof(struct sockaddr_un, sun_path) + namelen;
-  else
-    addrlen = sizeof saddr;
+  addrlen = offsetof(struct sockaddr_un, sun_path) + namelen;
 
   do {
-    r = connect(uv__stream_fd(handle), (struct sockaddr*)&saddr, addrlen);
+    r = connect(uv__stream_fd(handle), &saddr.sa, addrlen);
   }
   while (r == -1 && errno == EINTR);
 
@@ -380,7 +382,7 @@ static int uv__pipe_getsockpeername(const uv_pipe_t* handle,
   memset(&sa, 0, addrlen);
   err = uv__getsockpeername((const uv_handle_t*) handle,
                             func,
-                            (struct sockaddr*) &sa,
+                            &sa.sa,
                             (int*) &addrlen);
   if (err < 0) {
     *size = 0;
@@ -388,15 +390,15 @@ static int uv__pipe_getsockpeername(const uv_pipe_t* handle,
   }
 
   slop = 1;
-  if (is_linux && sa.up.path[0] == '\0') {
+  if (is_linux && sa.sun.sun_path[0] == '\0') {
     /* Linux abstract namespace. Not zero-terminated. */
     slop = 0;
     addrlen -= offsetof(struct sockaddr_un, sun_path);
   } else {
-    p = memchr(sa.up.path, '\0', sizeof(sa.up.path));
+    p = memchr(sa.sun.sun_path, '\0', UV__NAME_BUFFER_SIZE);
     if (p == NULL)
-      p = ARRAY_END(sa.up.path);
-    addrlen = p - sa.up.path;
+      p = ARRAY_END(sa._storage);
+    addrlen = p - sa.sun.sun_path;
   }
 
   if ((size_t)addrlen + slop > *size) {
@@ -404,7 +406,7 @@ static int uv__pipe_getsockpeername(const uv_pipe_t* handle,
     return UV_ENOBUFS;
   }
 
-  memcpy(buffer, sa.up.path, addrlen);
+  memcpy(buffer, sa.sun.sun_path, addrlen);
   *size = addrlen;
 
   /* only null-terminate if it's not an abstract socket */

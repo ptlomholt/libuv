@@ -370,8 +370,11 @@ TEST_IMPL(pipe_getsockname_blocking) {
   MAKE_VALGRIND_HAPPY(uv_default_loop());
   return 0;
 }
+#if defined(__APPLE__) && defined(SOCK_MAXADDRLEN)
+#define UV__TEST_LONG_UNIX_PATHS
+#endif
 
-#ifdef SOCK_MAXADDRLEN
+#ifdef UV__TEST_LONG_UNIX_PATHS
 static void long_path_connect_cb(uv_connect_t* req, int status) {
   ASSERT_OK(status);
   uv_close((uv_handle_t*) req->handle, NULL);
@@ -379,7 +382,7 @@ static void long_path_connect_cb(uv_connect_t* req, int status) {
 #endif
 
 TEST_IMPL(pipe_getsockname_long_path) {
-#ifndef SOCK_MAXADDRLEN
+#ifndef UV__TEST_LONG_UNIX_PATHS
   RETURN_SKIP("long unix paths not supported on this platform");
 #else
   uv_loop_t* loop;
